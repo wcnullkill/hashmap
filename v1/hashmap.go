@@ -60,7 +60,7 @@ func makemap(cap uint) *hmap {
 	h := new(hmap)
 	h.cap = cap
 	B := uint8(0)
-	for overloadFactor(cap, B) {
+	for !overloadFactor(cap, B) {
 		B++
 	}
 	h.b = B
@@ -187,9 +187,9 @@ func (bm *bmap) update(index uint8, key string, val interface{}, hash uint64) {
 	bm.count++
 }
 
-// 计算cap是否大于2^b
+// 计算cap是否小于等于2^b
 func overloadFactor(cap uint, b uint8) bool {
-	return cap >= 1<<b
+	return cap <= 1<<b
 }
 
 // 计算桶的位置，也就是hash值的低b位
