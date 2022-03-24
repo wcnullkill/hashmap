@@ -1,6 +1,8 @@
 package v1
 
-import "hash/maphash"
+import (
+	"hash/maphash"
+)
 
 type Hash interface {
 	Seed() maphash.Seed
@@ -26,5 +28,7 @@ func (hash *mapHash) Seed() maphash.Seed {
 func (hash *mapHash) Hash(key string) uint64 {
 	hash.h.WriteString(key)
 	s := hash.h.Sum64()
+	// 清空缓存
+	hash.h.Reset()
 	return s
 }

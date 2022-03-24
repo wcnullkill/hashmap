@@ -1,15 +1,18 @@
 package v1
 
-import "hash/maphash"
+import (
+	"hash/maphash"
+)
 
 type hmap struct {
-	count        uint // map内所有元素个数
-	buckets      []*bmap
-	b            uint8 //
-	buckestCount uint  // 桶的数量
-	cap          uint  // 初始化时，预设的map容量
-	mapHash      Hash
+	count        uint         // map内所有元素个数
+	buckets      []*bmap      // 所有桶
+	b            uint8        // 当前设置2^b为正常桶的个数
+	buckestCount uint         // 桶的数量
+	cap          uint         // 初始化时，预设的map容量
+	mapHash      Hash         //hash函数
 	seed         maphash.Seed // 类似于hash0
+
 }
 
 func NewHMap(cap int) *hmap {
@@ -56,16 +59,21 @@ func (hm *hmap) del(key string) bool {
 	return bucket.del(key, hash)
 }
 
+// 简单计算装载因子
+func (hm *hmap) loadFactor() float32 {
+	return float32(hm.count) / float32(hm.buckestCount)
+}
+
 func makemap(cap uint) *hmap {
 	h := new(hmap)
 	h.cap = cap
 	B := uint8(0)
-	for !overloadFactor(cap, B) {
+	for overloadFactor(cap, B) {
 		B++
 	}
 	h.b = B
+	h.buckets = bmapSliceMake(B)
 	h.buckestCount = 1 << B
-	h.buckets = make([]*bmap, h.buckestCount)
 	h.seed = maphash.MakeSeed()
 	hash := newMapHash(h.seed)
 	h.mapHash = hash
@@ -108,21 +116,24 @@ func (bm *bmap) set(key string, val interface{}, hash uint64) bool {
 		return true
 	}
 	// 再找溢出桶
-	b = bm.overflow
-	for b != nil {
-		index, ok = bmapGetFree(b)
+	pre := b
+	overflow := b.overflow
+	for overflow != nil {
+		index, ok = bmapGetFree(overflow)
 		if ok {
-			b.update(index, key, val, hash)
-			b.count++
+			overflow.update(index, key, val, hash)
+			overflow.count++
 			return true
 		}
+		pre = overflow
+		overflow = overflow.overflow
 	}
 	// 如果溢出桶也满了，就创建一个新的溢出桶
-	overflow := new(bmap)
-	b.overflow = overflow
+	overflow = bmapInit()
 
 	overflow.update(index, key, val, hash)
 	overflow.count++
+	pre.overflow = overflow
 	return true
 }
 
@@ -145,14 +156,21 @@ func (bm *bmap) getIndex(key string, hash uint64) (*bmap, uint8, bool) {
 		return b, index, true
 	}
 	// 从溢出桶搜索
-	b = b.overflow
-	for b != nil && b.count > 0 {
-		index, ok := bmapSearch(bm, key, hash)
+	overflow := b.overflow
+	for overflow != nil && overflow.count > 0 {
+		index, ok := bmapSearch(overflow, key, hash)
 		if ok {
-			return b, index, true
+			return overflow, index, true
 		}
+		overflow = overflow.overflow
 	}
 	return nil, uint8(0), false
+}
+func (bm *bmap) update(index uint8, key string, val interface{}, hash uint64) {
+	bm.tophash[index] = calTopHash(hash)
+	bm.keyhash[index] = hash
+	bm.keys[index] = key
+	bm.vals[index] = val
 }
 
 // 从桶中查询
@@ -172,32 +190,41 @@ func bmapGetFree(bm *bmap) (uint8, bool) {
 		return uint8(0), false
 	}
 	for i := 0; i < 8; i++ {
-		if bm.keyhash[i] == 0 {
+		if bm.tophash[i] == 0 && bm.keyhash[i] == 0 {
 			return uint8(i), true
 		}
 	}
 	return uint8(0), false
 }
 
-func (bm *bmap) update(index uint8, key string, val interface{}, hash uint64) {
-	bm.tophash[index] = calTopHash(hash)
-	bm.keyhash[index] = hash
-	bm.keys[index] = key
-	bm.vals[index] = val
-	bm.count++
+func bmapSliceMake(b uint8) []*bmap {
+	s := make([]*bmap, 1<<b)
+	for i := 0; i < 1<<b; i++ {
+		s[i] = bmapInit()
+	}
+	return s
 }
 
-// 计算cap是否小于等于2^b
+func bmapInit() *bmap {
+	bm := new(bmap)
+	bm.tophash = [8]uint8{}
+	bm.keyhash = [8]uint64{}
+	bm.keys = [8]string{}
+	bm.vals = [8]interface{}{}
+	return bm
+}
+
+// 计算cap是否大于2^b
 func overloadFactor(cap uint, b uint8) bool {
-	return cap <= 1<<b
+	return cap > 1<<(b+3)
 }
 
 // 计算桶的位置，也就是hash值的低b位
 func calbucket(hash uint64, b uint8) uint64 {
-	return hash & (1<<(b+1) - 1)
+	return hash & (1<<(b) - 1)
 }
 
 // 计算tophash，也就是hash值的高八位
 func calTopHash(hash uint64) uint8 {
-	return uint8(hash >> 46)
+	return uint8(hash >> 56)
 }
