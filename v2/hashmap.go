@@ -5,13 +5,14 @@ import (
 )
 
 type hmap struct {
-	count        uint         // map内所有元素个数
-	buckets      []*bmap      // 所有桶
-	b            uint8        // 当前设置2^b为正常桶的个数
-	buckestCount uint         // 桶的数量
-	cap          uint         // 初始化时，预设的map容量
-	mapHash      Hash         //hash函数
-	seed         maphash.Seed // 类似于hash0
+	count           uint    // map内所有元素个数
+	buckets         []*bmap // 所有桶
+	b               uint8   // 当前设置2^b为正常桶的个数
+	buckestCount    uint    // 桶的数量
+	overflowBucktes []*bmap
+	cap             uint         // 初始化时，预设的map容量
+	mapHash         Hash         //hash函数
+	seed            maphash.Seed // 类似于hash0
 
 }
 
@@ -43,8 +44,45 @@ func (hm *hmap) Count() int {
 func (hm *hmap) set(key string, val interface{}) bool {
 	hash := hm.mapHash.Hash(key)
 	bucketIndex := calbucket(hash, hm.b)
-	bucket := hm.buckets[bucketIndex]
-	return bucket.set(key, val, hash)
+	bm := hm.buckets[bucketIndex]
+	// 先从正常桶和溢出桶查找
+	// 如果找到了，就直接更新
+	bucket, index, ok := bm.getIndex(key, hash)
+	if ok {
+		bucket.vals[index] = val
+		return true
+	}
+	// 没有找到，将值插入一个空闲处
+	// 先从正常桶插入
+	b := bm
+	index, ok = bmapGetFree(b)
+	if ok {
+		b.update(index, key, val, hash)
+		b.count++
+		return true
+	}
+	// 再找溢出桶
+	pre := b
+	overflow := b.overflow
+	for overflow != nil {
+		index, ok = bmapGetFree(overflow)
+		if ok {
+			overflow.update(index, key, val, hash)
+			overflow.count++
+			return true
+		}
+		pre = overflow
+		overflow = overflow.overflow
+	}
+
+	// 如果溢出桶也满了，就创建一个新的溢出桶
+	overflow = bmapInit()
+
+	overflow.update(index, key, val, hash)
+	overflow.count++
+	pre.overflow = overflow
+
+	return true
 }
 func (hm *hmap) get(key string) (interface{}, bool) {
 	hash := hm.mapHash.Hash(key)
@@ -97,13 +135,15 @@ func (bm *bmap) get(key string, hash uint64) (interface{}, bool) {
 	return nil, false
 }
 
-// 返回值表示是否属于新增
-func (bm *bmap) set(key string, val interface{}, hash uint64) bool {
+// 遍历正常桶和溢出桶
+// success 表示set是否成功
+// newCreate 表示是否属于新建
+func (bm *bmap) set(key string, val interface{}, hash uint64) (success bool, newCreate bool) {
 	// 首先尝试搜索
 	bucket, index, ok := bm.getIndex(key, hash)
 	if ok {
 		bucket.vals[index] = val
-		return false
+		return true, false
 	}
 
 	// 没有找到，将值插入一个空闲处
@@ -113,7 +153,7 @@ func (bm *bmap) set(key string, val interface{}, hash uint64) bool {
 	if ok {
 		b.update(index, key, val, hash)
 		b.count++
-		return true
+		return true, true
 	}
 	// 再找溢出桶
 	pre := b
@@ -123,11 +163,13 @@ func (bm *bmap) set(key string, val interface{}, hash uint64) bool {
 		if ok {
 			overflow.update(index, key, val, hash)
 			overflow.count++
-			return true
+			return true, true
 		}
 		pre = overflow
 		overflow = overflow.overflow
 	}
+
+	return false, false
 	// 如果溢出桶也满了，就创建一个新的溢出桶
 	overflow = bmapInit()
 
