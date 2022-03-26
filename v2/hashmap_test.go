@@ -49,7 +49,7 @@ func TestNewHMap2(t *testing.T) {
 	for _, v := range table {
 		m := NewHMap(v.cap)
 		assert.Equal(v.b, m.b, v.cap)
-		assert.Equal(v.bucketCount, m.buckestCount, v.cap)
+		assert.Equal(v.bucketCount, m.bucketCount, v.cap)
 	}
 }
 
@@ -229,14 +229,4 @@ func TestOverflow(t *testing.T) {
 			assert.Equal(i, val, i)
 		}
 	}
-}
-
-func TestLoadFactor1(t *testing.T) {
-	assert := assert.New(t)
-	m := NewHMap(1 << 4)
-	count := 1 << 4
-	for i := 0; i < count; i++ {
-		m.Set(strconv.Itoa(i), i)
-	}
-	assert.Equal(float32(8), m.loadFactor())
 }
