@@ -5,11 +5,11 @@ import (
 )
 
 type hmap struct {
-	count           uint    // map内所有元素个数
-	buckets         []*bmap // 所有桶
-	b               uint8   // 当前设置2^b为正常桶的个数
-	buckestCount    uint    // 桶的数量
-	overflowBucktes []*bmap
+	count           uint         // map内所有元素个数
+	buckets         []*bmap      // 正常桶
+	b               uint8        // 当前设置2^b为正常桶的个数
+	buckestCount    uint         // 桶的数量
+	overflowBucktes []*bmap      // 溢出桶
 	cap             uint         // 初始化时，预设的map容量
 	mapHash         Hash         //hash函数
 	seed            maphash.Seed // 类似于hash0
@@ -81,7 +81,7 @@ func (hm *hmap) set(key string, val interface{}) bool {
 	overflow.update(index, key, val, hash)
 	overflow.count++
 	pre.overflow = overflow
-
+	hm.overflowBucktes = append(hm.overflowBucktes, overflow)
 	return true
 }
 func (hm *hmap) get(key string) (interface{}, bool) {
@@ -111,6 +111,7 @@ func makemap(cap uint) *hmap {
 	}
 	h.b = B
 	h.buckets = bmapSliceMake(B)
+	h.overflowBucktes = make([]*bmap, 0)
 	h.buckestCount = 1 << B
 	h.seed = maphash.MakeSeed()
 	hash := newMapHash(h.seed)
@@ -133,50 +134,6 @@ func (bm *bmap) get(key string, hash uint64) (interface{}, bool) {
 		return b.vals[index], true
 	}
 	return nil, false
-}
-
-// 遍历正常桶和溢出桶
-// success 表示set是否成功
-// newCreate 表示是否属于新建
-func (bm *bmap) set(key string, val interface{}, hash uint64) (success bool, newCreate bool) {
-	// 首先尝试搜索
-	bucket, index, ok := bm.getIndex(key, hash)
-	if ok {
-		bucket.vals[index] = val
-		return true, false
-	}
-
-	// 没有找到，将值插入一个空闲处
-	// 先从正常桶插入
-	b := bm
-	index, ok = bmapGetFree(b)
-	if ok {
-		b.update(index, key, val, hash)
-		b.count++
-		return true, true
-	}
-	// 再找溢出桶
-	pre := b
-	overflow := b.overflow
-	for overflow != nil {
-		index, ok = bmapGetFree(overflow)
-		if ok {
-			overflow.update(index, key, val, hash)
-			overflow.count++
-			return true, true
-		}
-		pre = overflow
-		overflow = overflow.overflow
-	}
-
-	return false, false
-	// 如果溢出桶也满了，就创建一个新的溢出桶
-	overflow = bmapInit()
-
-	overflow.update(index, key, val, hash)
-	overflow.count++
-	pre.overflow = overflow
-	return true
 }
 
 func (bm *bmap) del(key string, hash uint64) bool {

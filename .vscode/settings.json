@@ -1,3 +1,4 @@
 {
-    "go.coverOnSave": true
+    "go.coverOnSave": true,
+    "editor.fontSize": 15
 }
