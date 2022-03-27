@@ -230,3 +230,14 @@ func TestOverflow(t *testing.T) {
 		}
 	}
 }
+
+func TestOverflow1(t *testing.T) {
+	// ssert := assert.New(t)
+	m := NewHMap(1 << 4)
+	count := 1 << 10
+	for i := 0; i < count; i++ {
+		m.Set(strconv.Itoa(i), i)
+	}
+	// fmt.Println(m.count, 13*m.bucketCount/2)
+	m.Set(strconv.Itoa(count), count)
+}

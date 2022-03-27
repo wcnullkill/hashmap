@@ -5,17 +5,17 @@ import (
 )
 
 type hmap struct {
-	count              uint         // map内所有元素个数
-	b                  uint8        // 当前设置2^b为正常桶的个数
-	bucketCount        uint         // 桶的数量
-	buckets            []*bmap      // 正常桶
-	overflowBuckets    []*bmap      // 溢出桶
-	oldBuckets         []*bmap      // 正常桶，扩容时使用
-	oldOverflowBuckets []*bmap      // 溢出桶，扩容时使用
-	cap                uint         // 初始化时，预设的map容量
-	mapHash            Hash         //hash函数
-	seed               maphash.Seed // 类似于hash0
-	noverflow          uint16       // 大致的溢出桶个数
+	count           uint    // map内所有元素个数
+	b               uint8   // 当前设置2^b为正常桶的个数
+	bucketCount     uint    // 桶的数量
+	buckets         []*bmap // 正常桶
+	overflowBuckets []*bmap // 溢出桶
+	// oldBuckets         []*bmap      // 正常桶，扩容时使用
+	// oldOverflowBuckets []*bmap      // 溢出桶，扩容时使用
+	cap       uint         // 初始化时，预设的map容量
+	mapHash   Hash         //hash函数
+	seed      maphash.Seed // 类似于hash0
+	noverflow uint16       // 大致的溢出桶个数
 
 }
 
@@ -45,6 +45,10 @@ func (hm *hmap) Count() int {
 
 // 返回值表示是否属于新增
 func (hm *hmap) set(key string, val interface{}) bool {
+	if hm.testhashGrow() {
+		hm.hashGrow()
+	}
+
 	hash := hm.mapHash.Hash(key)
 	bucketIndex := calbucket(hash, hm.b)
 	bm := hm.buckets[bucketIndex]
@@ -86,14 +90,7 @@ func (hm *hmap) set(key string, val interface{}) bool {
 	pre.overflow = overflow
 	hm.overflowBuckets = append(hm.overflowBuckets, overflow)
 	hm.incrnoverflow()
-	// 优先判断增量扩容
-	if testTooManyBuckets(hm.noverflow, hm.b) {
-		// 增量扩容
-		hm.grow()
-	} else if testSameSizeGrow(hm.count, hm.bucketCount) {
-		// 等量扩容
-		hm.sameSizeGrow()
-	}
+
 	return true
 }
 func (hm *hmap) get(key string) (interface{}, bool) {
@@ -109,13 +106,54 @@ func (hm *hmap) del(key string) bool {
 	return bucket.del(key, hash)
 }
 
-// 等量扩容
+// 等量扩容，一次性分配
+// 正常桶容量不变，将原本正常桶及其溢出桶，重新插入新的正常桶+溢出桶中，使key，val更紧密
 // 触发条件，溢出桶太多
 func (hm *hmap) sameSizeGrow() {
-
+	oldbuckets := hm.buckets
+	B := hm.b
+	hm.buckets = bmapSliceMake(B)
+	hm.overflowBuckets = make([]*bmap, 0)
+	hm.noverflow = 0
+	// 原来的i->i
+	for i := 0; i < len(oldbuckets); i++ {
+		oldbm := oldbuckets[i]
+		newbm := hm.buckets[i]
+		for oldbm != nil {
+			for j := uint8(0); j < uint8(8); j++ {
+				if !bmapEmpty(oldbm, j) {
+					// 尝试找本桶空闲
+					index, ok := bmapGetFree(newbm)
+					if ok {
+						bmapcopy(oldbm, j, newbm, index)
+						newbm.count++
+						continue
+					}
+					// 如果本桶没有空闲，则找溢出桶
+					for newbm.overflow != nil {
+						index, ok = bmapGetFree(newbm.overflow)
+						if ok {
+							// 将旧bmap里的tophash,key,hash,val复制到新bmap里
+							bmapcopy(oldbm, j, newbm, index)
+							newbm.count++
+							continue
+						}
+					}
+					// 新bmap已满，创建新的溢出桶
+					newbmap := bmapInit()
+					newbm.overflow = newbmap
+					hm.overflowBuckets = append(hm.overflowBuckets, newbmap)
+					newbm = newbmap
+					hm.incrnoverflow()
+				}
+			}
+			oldbm = oldbm.overflow
+		}
+	}
 }
 
-// 增量扩容，一次性分配
+// 翻倍扩容，一次性分配
+// 将原本buckets[i]，分流到newBuckets[i]和newBuckets[i+(1<<hm.b)]上
 // 触发条件，装载因子大于6.5
 func (hm *hmap) grow() {
 	oldbucktes := hm.buckets
@@ -124,6 +162,7 @@ func (hm *hmap) grow() {
 
 	hm.buckets = bmapSliceMake(B)
 	hm.overflowBuckets = make([]*bmap, 0)
+	hm.noverflow = 0
 	// 原来的i->{i,i+2^b}
 	for i := 0; i < len(oldbucktes); i++ {
 		oldbm := oldbucktes[i]
@@ -134,7 +173,8 @@ func (hm *hmap) grow() {
 				if !bmapEmpty(oldbm, j) {
 					var newbm *bmap
 					// 由倒数第B位取决分流
-					if oldbm.keyhash[j]&1<<B == 0 {
+					// fmt.Printf("%b,%b\r\n", oldbm.keyhash[j], 1<<B)
+					if oldbm.keyhash[j]&(1<<B) == 0 {
 						newbm = newbm1
 					} else {
 						newbm = newbm2
@@ -162,16 +202,19 @@ func (hm *hmap) grow() {
 					newbmap := bmapInit()
 					newbm.overflow = newbmap
 					hm.overflowBuckets = append(hm.overflowBuckets, newbmap)
-					if oldbm.keyhash[j]&1<<B == 0 {
+					if oldbm.keyhash[j]&(1<<B) == 0 {
 						newbm1 = newbmap
 					} else {
 						newbm2 = newbmap
 					}
+					hm.incrnoverflow()
 				}
 			}
 			oldbm = oldbm.overflow
 		}
 	}
+	hm.b++
+	hm.bucketCount = 1 << hm.b
 }
 
 // noverflow直接+1
@@ -181,21 +224,37 @@ func (hm *hmap) incrnoverflow() {
 	hm.noverflow++
 }
 
-// 是否满足等量扩容条件
+// 是否满足扩容条件
+func (hm *hmap) testhashGrow() bool {
+	return overLoadFactor(hm.count+1, hm.bucketCount) || testTooManyBuckets(hm.noverflow, hm.b)
+}
+func (hm *hmap) hashGrow() {
+	if overLoadFactor(hm.count+1, hm.bucketCount) {
+		// 翻倍扩容
+		hm.grow()
+
+	} else {
+		// 等量扩容
+		hm.sameSizeGrow()
+	}
+
+}
+
+// 是否满足翻倍扩容条件
 // 如果装载因子超过6.5，则返回true
-func testSameSizeGrow(count uint, bucketCount uint) bool {
+func overLoadFactor(count uint, bucketCount uint) bool {
 	// bucketcount目前最大1<<30，暂时不考虑溢出
 	return count > bucketCount*13/2
 }
 
-// 如果b>10，返回noverflow>=1<<10
-// 如果b<=10，返回noverflow>=1<<b
-// golang中10这个值，是15
+// 是否满足等量扩容条件
+// 如果b>15，返回noverflow>=1<<15
+// 如果b<=15，返回noverflow>=1<<b
 func testTooManyBuckets(noverflow uint16, b uint8) bool {
-	if b > 10 {
-		b = 10
+	if b > 15 {
+		b = 15
 	}
-	return noverflow >= uint16(1)<<(b&10)
+	return noverflow >= uint16(1)<<(b&15)
 }
 
 func makemap(cap uint) *hmap {
@@ -321,6 +380,7 @@ func bmapcopy(src *bmap, srcIndex uint8, dst *bmap, dstIndex uint8) {
 	dst.keyhash[dstIndex] = src.keyhash[srcIndex]
 	dst.keys[dstIndex] = src.keys[srcIndex]
 	dst.vals[dstIndex] = src.vals[srcIndex]
+	// fmt.Println(dst.keys[dstIndex], src.keys[srcIndex])
 }
 
 // 计算cap是否大于2^b
